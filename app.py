@@ -5,6 +5,7 @@ Artista principal: Fleetwood Mac
 Basado en el notebook Spotify_Lyrics_Analysis.ipynb
 """
 
+import os
 import time
 import re
 import warnings
@@ -21,6 +22,28 @@ from collections import Counter
 from wordcloud import WordCloud
 
 warnings.filterwarnings("ignore")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DESCARGA AUTOMÁTICA DEL DATASET DESDE GOOGLE DRIVE
+# ID extraído de: https://drive.google.com/file/d/12ZjQa-A3Yddq_Fyh0w9ARvXrU8BYMvAt/view
+# ─────────────────────────────────────────────────────────────────────────────
+GDRIVE_FILE_ID = "12ZjQa-A3Yddq_Fyh0w9ARvXrU8BYMvAt"
+DATA_FILE = "tracks_features.csv"
+
+
+@st.cache_resource(show_spinner=False)
+def download_dataset():
+    """Descarga el CSV desde Google Drive si no existe ya en disco."""
+    if os.path.exists(DATA_FILE):
+        return True
+    try:
+        import gdown
+        url = f"https://drive.google.com/uc?id={GDRIVE_FILE_ID}"
+        gdown.download(url, DATA_FILE, quiet=False)
+        return True
+    except Exception as e:
+        st.error(f"Error al descargar el dataset: {e}")
+        return False
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CONFIG
@@ -128,7 +151,7 @@ def get_album_order(adf: pd.DataFrame) -> list:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# HELPERS 
+# HELPERS — letras (mismo fetch_lyrics / clean_lyrics / tokenize que el notebook)
 # ─────────────────────────────────────────────────────────────────────────────
 @st.cache_data(show_spinner=False, ttl=3600)
 def fetch_lyrics(artist: str, title: str) -> str | None:
@@ -165,7 +188,7 @@ def lyrics_stats(lyrics: str) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# GRÁFICOS
+# GRÁFICOS (misma lógica que el notebook)
 # ─────────────────────────────────────────────────────────────────────────────
 def plot_track_counts(adf: pd.DataFrame, album_order: list, artist_name: str):
     tc = adf.groupby('short_album_name')['name'].count().loc[album_order]
@@ -252,6 +275,26 @@ def plot_word_freq(freq: pd.Series, title: str):
     return fig
 
 
+def plot_richness(vocab_data: dict, album_order: list, artist_name: str):
+    albums = [a for a in album_order if a in vocab_data]
+    unique_vals = [vocab_data[a]['unique_words'] for a in albums]
+    ttr_vals = [vocab_data[a]['ttr'] for a in albums]
+    colors = sns.color_palette('tab10', len(albums))
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    axes[0].barh(albums[::-1], unique_vals[::-1], color=colors[::-1])
+    axes[0].set_xlabel('Palabras únicas')
+    axes[0].set_title(f'Vocabulario único por álbum\n{artist_name}')
+
+    axes[1].barh(albums[::-1], ttr_vals[::-1], color=colors[::-1])
+    axes[1].set_xlabel('TTR (Type-Token Ratio)')
+    axes[1].set_title(f'Riqueza léxica (TTR) por álbum\n{artist_name}')
+
+    plt.suptitle('Análisis de letras por álbum de estudio', fontsize=13, y=1.02)
+    plt.tight_layout()
+    return fig
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # SIDEBAR
 # ─────────────────────────────────────────────────────────────────────────────
@@ -270,17 +313,13 @@ with st.sidebar:
     cfg = ARTISTS_CONFIG[artist_name]
 
     st.markdown("---")
-    data_path = st.text_input("Ruta al CSV de Spotify", "tracks_features.csv")
-    load_btn = st.button("🔄 Cargar dataset")
-
-    st.markdown("---")
     st.caption(
         f"Álbumes de estudio definidos según Wikipedia.\n\n"
         f"[Ver discografía ↗]({cfg['wiki']})"
     )
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ESTADO DE SESIÓN
+# DESCARGA Y CARGA AUTOMÁTICA DEL DATASET
 # ─────────────────────────────────────────────────────────────────────────────
 if "df" not in st.session_state:
     st.session_state.df = None
@@ -289,17 +328,18 @@ if "adf" not in st.session_state:
 if "current_artist" not in st.session_state:
     st.session_state.current_artist = None
 
-if load_btn or st.session_state.df is None:
-    try:
-        with st.spinner("Cargando dataset..."):
-            st.session_state.df = load_dataset(data_path)
-        st.sidebar.success(f"Dataset cargado: {len(st.session_state.df):,} filas")
-    except FileNotFoundError:
-        st.sidebar.error(
-            f"No se encontró `{data_path}`.\n\n"
-            "Descárgalo de [Kaggle](https://www.kaggle.com/datasets/rodolfofigueroa/spotify-12m-songs) "
-            "y ponlo en la misma carpeta que `app.py`."
-        )
+if st.session_state.df is None:
+    with st.spinner("⬇️ Descargando dataset desde Google Drive (solo la primera vez)..."):
+        ok = download_dataset()
+    if ok:
+        with st.spinner("📂 Cargando dataset..."):
+            try:
+                st.session_state.df = load_dataset(DATA_FILE)
+                st.sidebar.success(f"✅ Dataset listo: {len(st.session_state.df):,} filas")
+            except Exception as e:
+                st.sidebar.error(f"Error al leer el CSV: {e}")
+    else:
+        st.sidebar.error("No se pudo descargar el dataset.")
 
 if st.session_state.df is not None and artist_name != st.session_state.current_artist:
     with st.spinner(f"Filtrando álbumes de estudio de {artist_name}..."):
@@ -311,7 +351,7 @@ adf = st.session_state.adf
 
 no_data = adf is None
 if no_data:
-    placeholder_msg = "⬅️ Introduce la ruta al CSV y pulsa **Cargar dataset**."
+    placeholder_msg = "⏳ Esperando a que se cargue el dataset..."
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SECCIÓN 1 — ÁLBUMES DE ESTUDIO (Punto 1)
@@ -411,7 +451,7 @@ elif section == "📝 Análisis de Letras":
     st.title(f"📝 Análisis de Letras — {artist_name}")
     st.markdown(
         "Letras obtenidas en tiempo real desde **[lyrics.ovh](https://lyrics.ovh/)**. "
-        "Se analizan nube de palabras, frecuencia de vocabulario"
+        "Se analizan nube de palabras, frecuencia de vocabulario, riqueza léxica "
         "y se puede consultar la letra completa de cualquier canción."
     )
 
